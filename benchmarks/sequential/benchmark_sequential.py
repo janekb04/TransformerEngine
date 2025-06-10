@@ -4,6 +4,7 @@
 
 import torch
 from torch import nn
+import transformer_engine.pytorch as te
 from fused_te_layer import FusedTETransformerLayer
 from sequential_te_layer import SequentialTETransformerLayer
 from utils import speedometer
@@ -33,6 +34,13 @@ sequential_te_transformer_layer = SequentialTETransformerLayer(
 )
 sequential_te_transformer_layer.to(dtype=DTYPE).cuda()
 
+builtin_te_transformer_layer = te.TransformerLayer(
+    HIDDEN_SIZE,
+    FFN_HIDDEN_SIZE,
+    NUM_ATTENTION_HEADS
+)
+builtin_te_transformer_layer.to(dtype=DTYPE).cuda()
+
 # Synthetic data
 x = torch.rand(SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_SIZE).cuda().to(dtype=DTYPE)
 dy = torch.rand(SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_SIZE).cuda().to(dtype=DTYPE)
@@ -51,3 +59,4 @@ def test_layer(layer: nn.Module, name: str):
 
 test_layer(fused_te_transformer_layer, "Fused TE Layer")
 test_layer(sequential_te_transformer_layer, "Sequential TE Layer")
+test_layer(builtin_te_transformer_layer, "Builtin TE TransformerLayer")
