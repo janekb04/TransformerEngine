@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import torch
+from torch import nn
 from fused_te_layer import FusedTETransformerLayer
 from sequential_te_layer import SequentialTETransformerLayer
 from utils import speedometer
@@ -37,22 +38,16 @@ x = torch.rand(SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_SIZE).cuda().to(dtype=DTYPE)
 dy = torch.rand(SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_SIZE).cuda().to(dtype=DTYPE)
 
 # Test layers
-print("Fused TE Layer")
-with nvtx.annotate("Fused TE Layer"):
-    fused_te_mean_ms = speedometer(
-        fused_te_transformer_layer,
-        x,
-        dy,
-        forward_kwargs = { "attention_mask": None },
-    )
-print(f"Mean time: {fused_te_mean_ms:.2f} ms")
+def test_layer(layer: nn.Module, name: str):
+    print(name)
+    with nvtx.annotate(name):
+        mean_ms = speedometer(
+            layer,
+            x,
+            dy,
+            forward_kwargs = { "attention_mask": None },
+        )
+    print(f"Mean time: {mean_ms:.2f} ms")
 
-print("Sequential TE Layer")
-with nvtx.annotate("Sequential TE Layer"):
-    sequential_te_mean_ms = speedometer(
-        sequential_te_transformer_layer,
-        x,
-        dy,
-        forward_kwargs = { "attention_mask": None },
-    )
-print(f"Mean time: {sequential_te_mean_ms:.2f} ms")
+test_layer(fused_te_transformer_layer, "Fused TE Layer")
+test_layer(sequential_te_transformer_layer, "Sequential TE Layer")
