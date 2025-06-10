@@ -6,6 +6,7 @@ import math
 from typing import Optional
 import torch
 import transformer_engine.pytorch as te
+import nvtx
 
 
 def speedometer(
@@ -26,19 +27,24 @@ def speedometer(
     if fp8_autocast_kwargs is None:
         fp8_autocast_kwargs = {"enabled": False}
 
+    def _benchmark(iters: int):
+        for i in range(iters):
+            with nvtx.annotate(f"iter_{i}"):
+                with nvtx.annotate("forward"):
+                    with te.fp8_autocast(**fp8_autocast_kwargs):
+                        output = module(input, **forward_kwargs)
+                with nvtx.annotate("backward"):
+                    output.backward(output_grad)
+
     # Warmup runs
     torch.cuda.synchronize()
-    for _ in range(warmup_iters):
-        with te.fp8_autocast(**fp8_autocast_kwargs):
-            output = module(input, **forward_kwargs)
-        output.backward(output_grad)
+    with nvtx.annotate("warmup"):
+        _benchmark(warmup_iters)
 
     # Timing runs
     start.record()
-    for _ in range(timing_iters):
-        with te.fp8_autocast(**fp8_autocast_kwargs):
-            output = module(input, **forward_kwargs)
-        output.backward(output_grad)
+    with nvtx.annotate("timing"):
+        _benchmark(timing_iters)
     end.record()
     torch.cuda.synchronize()
 
