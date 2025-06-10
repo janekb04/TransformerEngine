@@ -16,7 +16,7 @@ def speedometer(
     fp8_autocast_kwargs: Optional[dict] = None,
     timing_iters: int = 50,
     warmup_iters: int = 50,
-) -> None:
+) -> float:
     """Measure average run time for a PyTorch module
 
     Performs forward and backward passes.
@@ -42,8 +42,8 @@ def speedometer(
     end.record()
     torch.cuda.synchronize()
 
-    print(f"Mean time: {start.elapsed_time(end)/timing_iters} ms")
-
+    elapsed_ms = start.elapsed_time(end)/timing_iters
+    return elapsed_ms
 
 class DotProductAttention(torch.nn.Module):
     """Attention operation in Transformer layer

@@ -38,17 +38,29 @@ x = torch.rand(SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_SIZE).cuda().to(dtype=DTYPE)
 dy = torch.rand(SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_SIZE).cuda().to(dtype=DTYPE)
 
 # Test layers
-print("Fused TE Layer")
-speedometer(
-    fused_te_transformer_layer,
-    x,
-    dy,
-    forward_kwargs = { "attention_mask": None },
-)
-print("Sequential TE Layer")
-speedometer(
-    sequential_te_transformer_layer,
-    x,
-    dy,
-    forward_kwargs = { "attention_mask": None },
-)
+TEST_ITERS = 10
+for i in range(TEST_ITERS):
+    print()
+    print(f"Test iter {i}")
+    print("---------------")
+    print("Fused TE Layer")
+    fused_te_mean_ms = speedometer(
+        fused_te_transformer_layer,
+        x,
+        dy,
+        forward_kwargs = { "attention_mask": None },
+    )
+    print(f"Mean time: {fused_te_mean_ms:.2f} ms")
+
+    print("Sequential TE Layer")
+    sequential_te_mean_ms = speedometer(
+        sequential_te_transformer_layer,
+        x,
+        dy,
+        forward_kwargs = { "attention_mask": None },
+    )
+    print(f"Mean time: {sequential_te_mean_ms:.2f} ms")
+
+    time_percent_difference = (fused_te_mean_ms / sequential_te_mean_ms - 1) * 100
+    print()
+    print(f"Sequential TE Layer ran {abs(time_percent_difference):.2f}% {"slower" if time_percent_difference < 0 else "faster"} than Fused TE Layer")
