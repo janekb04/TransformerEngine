@@ -31,6 +31,7 @@ class SequentialTETransformerLayer(torch.nn.Module):
         self.projection = te.Linear(hidden_size, hidden_size, bias=True)
         self.dropout = torch.nn.Dropout(hidden_dropout)
         self.ln_mlp = te.ops.Sequential(
+            te.ops.LayerNorm(hidden_size, eps=layernorm_eps),
             te.ops.Linear(hidden_size, ffn_hidden_size, bias=True),
             te.ops.GELU(),
             te.ops.Linear(ffn_hidden_size, hidden_size, bias=True)
