@@ -323,6 +323,9 @@ class BasicLinear(BasicOperation):
             input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            input_quantizer.internal = True            
+            weight_quantizer.internal = True            
+            grad_output_quantizer.internal = True
 
             # Recipe-specific configuration
             recipe = FP8GlobalStateManager.get_fp8_recipe()
