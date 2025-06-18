@@ -143,6 +143,12 @@ class Float8TensorBase(QuantizedTensorBase):
         size = self._transpose.size(*args, **kwargs)
         return torch.Size([size[-1], math.prod(size[:-1])])
 
+    def view(self, shape: torch.Size):
+        data = self._data
+        if data is not None:
+            return data.view(shape)
+        raise RuntimeError("No data available to view")
+
     def __repr__(self):
         return (
             "Float8TensorBase("
