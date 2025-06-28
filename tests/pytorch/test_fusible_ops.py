@@ -153,7 +153,7 @@ def make_reference_and_test_tensors(
     return ref, test
 
 
-class TestSequential:
+class TestSequentialContainer:
     """Tests for sequential container"""
 
     def test_modules(self) -> None:
@@ -2081,3 +2081,193 @@ class TestCheckpointing:
             torch.testing.assert_close(y_load, y_save, **tols)
         for x_load, x_save in zip(xs_load, xs_save):
             torch.testing.assert_close(x_load.grad, x_save.grad, **tols)
+
+class TestSequentialModules:
+    """Test for larger Sequentials with modules commonly used together"""
+
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("normalization", ("LayerNorm", "RMSNorm"))
+    @pytest.mark.parametrize("quantized_compute", (False, True))
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    @pytest.mark.parametrize("device", _devices)
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_layernorm_mlp(
+        self,
+        *,
+        bias: bool,
+        normalization: str,
+        quantized_compute: bool,
+        quantized_weight: bool,
+        device: torch.device,
+        dtype: torch.dtype,
+        quantization: Optional[str],
+    ) -> None:
+        """Test sequential combination of normalization, linear, GELU, and linear layers"""
+
+        # Model dimensions
+        batch_size = 32
+        seq_len = 128
+        hidden_size = 256
+        intermediate_size = 1024
+        eps = 1e-5
+
+        # Input and output shapes
+        in_shape = (batch_size, seq_len, hidden_size)
+        intermediate_shape = (batch_size, seq_len, intermediate_size)
+        out_shape = (batch_size, seq_len, hidden_size)
+        norm_shape = (hidden_size,)
+
+        # Skip invalid configurations
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=intermediate_shape, device=device)
+        maybe_skip_quantization(quantization, dims=out_shape, device=device)
+        if quantized_compute and dtype not in (torch.float16, torch.bfloat16):
+            pytest.skip("FP8 compute only supported with FP16/BF16")
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Normalization weights
+        norm_w_ref, norm_w_test = make_reference_and_test_tensors(
+            norm_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # First linear layer weights and bias
+        linear1_w_ref, linear1_w_test = make_reference_and_test_tensors(
+            (intermediate_size, hidden_size),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        linear1_b_ref = linear1_b_test = None
+        if bias:
+            linear1_b_ref, linear1_b_test = make_reference_and_test_tensors(
+                (intermediate_size,),
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+                requires_grad=False,
+            )
+
+        # Second linear layer weights and bias
+        linear2_w_ref, linear2_w_test = make_reference_and_test_tensors(
+            (hidden_size, intermediate_size),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        linear2_b_ref = linear2_b_test = None
+        if bias:
+            linear2_b_ref, linear2_b_test = make_reference_and_test_tensors(
+                (hidden_size,),
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+                requires_grad=False,
+            )
+
+        # LayerNorm bias (only for LayerNorm, not RMSNorm)
+        norm_b_ref = norm_b_test = None
+        if normalization == "LayerNorm":
+            norm_b_ref, norm_b_test = make_reference_and_test_tensors(
+                norm_shape,
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+                requires_grad=False,
+            )
+
+        # Plain PyTorch reference implementation
+        if normalization == "LayerNorm":
+            y_ref = torch.nn.functional.layer_norm(x_ref, norm_shape, norm_w_ref, norm_b_ref, eps)
+        else:  # RMSNorm
+            var_ref = x_ref.square().mean(dim=-1, keepdim=True)
+            y_ref = x_ref / torch.sqrt(eps + var_ref) * norm_w_ref
+
+        # First linear layer
+        y_ref = torch.nn.functional.linear(
+            y_ref, linear1_w_ref, linear1_b_ref if bias else None
+        )
+        
+        # GELU activation
+        y_ref = torch.nn.functional.gelu(y_ref, approximate="tanh")
+        
+        # Second linear layer
+        y_ref = torch.nn.functional.linear(
+            y_ref, linear2_w_ref, linear2_b_ref if bias else None
+        )
+        
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operations
+        recipe = make_recipe(quantization)
+        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+            if normalization == "LayerNorm":
+                norm_op = te_ops.LayerNorm(norm_shape, eps=eps, device=device, dtype=dtype)
+            else:  # RMSNorm
+                norm_op = te_ops.RMSNorm(norm_shape, eps=eps, device=device, dtype=dtype)
+            
+            linear1_op = te_ops.Linear(
+                hidden_size, intermediate_size, bias=bias, device=device, dtype=dtype
+            )
+            gelu_op = te_ops.GELU()
+            linear2_op = te_ops.Linear(
+                intermediate_size, hidden_size, bias=bias, device=device, dtype=dtype
+            )
+            
+            model = te_ops.Sequential(norm_op, linear1_op, gelu_op, linear2_op)
+
+        # Copy weights to test model
+        with torch.no_grad():
+            model[0].weight.copy_(norm_w_test)
+            if normalization == "LayerNorm" and norm_b_test is not None:
+                model[0].bias.copy_(norm_b_test)
+            model[1].weight.copy_(linear1_w_test)
+            if bias and linear1_b_test is not None:
+                model[1].bias.copy_(linear1_b_test)
+            model[3].weight.copy_(linear2_w_test)
+            if bias and linear2_b_test is not None:
+                model[3].bias.copy_(linear2_b_test)
+
+        # Forward and backward pass with fusible operations
+        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            y_test = model(x_test)
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if quantized_compute:
+            tols = dtype_tols(tex.DType.kFloat8E4M3)
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        if x_test.grad is not None:
+            dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(y_test, y_ref, **tols)
