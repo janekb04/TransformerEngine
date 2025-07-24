@@ -25,38 +25,56 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
   auto [te_output, out] =
       my_quantizer->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
 
-  // for current scaling, we need to compute amax first and then quantize
-  // because cache cannot fit in the entire tensor to compute amax and quantize
-  // the quantizer should not need amax reduction, no process group needed here
+  // for current scaling, we need to compute activation and amax first and then quantize
+  // because we have no amax to rely on as the activation function will change the data range
+  // we cannot compute amax on the fly on a block by block basis while quantizing
+  // because the amax relies on the entirety of the tensor having undergone the activation
+  // amax reduction is not supported here, so no process group needed
   if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-    // activation function might change the input data range, we need to first call the activation function
-    // and then find the amax and scale of that and then do the quantization
-    // get a NoneQuantizer to calculate amax of activation output
+    // we compute both the activation and the amax in the activation kernel
+    
+    // we have to output in higher precision, so we create a tensor for storing that
     auto my_quantizer_none = std::make_unique<NoneQuantizer>(py::none());
     auto [te_output_act, out_act] =
         my_quantizer_none->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
 
+    // we set the amax of the high precision output (te_output_act) to point to the amax
+    // of the quantized output (te_output) which is owned by its quantizer to make sure
+    // that it gets populated by act_func
+    // usually act_func wouldn't compute the amax for high precision outputs as they don't
+    // have the amax set as they don't need it
+    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
+    const auto& amax = my_quantizer_cs->amax;
+    te_output_act.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
+                           getTensorShape(amax));
+
+    // compute the activation in high precision and store it in te_output_act
+    // and compute the amax and store it in my_quantizer_cs->amax (ie. te_output's amax)
     NVTE_SCOPED_GIL_RELEASE({
       act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
-      // use te_output_act as input to the compute amax and find the amax of activated tensor
-      nvte_compute_amax(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
     });
 
-    // my_quantizer here has to be a Float8CurrentScalingQuantizer
-    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
+    // unset the amax for te_output_act, as it is no longer needed
+    te_output_act.set_amax(nullptr, DType::kFloat32, te_output_act.defaultShape);
+
+    // verify that the quantizer doesn't require amax reduction
     if (my_quantizer_cs->with_amax_reduction) {
       NVTE_ERROR(
           "per-tensor current scaling amax reduction is not supported in activation functions.");
     }
+    
+    // set quantization config parameters
     QuantizationConfigWrapper quant_config;
     quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
 
     NVTE_SCOPED_GIL_RELEASE({
+      // compute te_output's scale from its amax (set above by act_funct through te_output_act)
       nvte_compute_scale_from_amax(te_output.data(), quant_config,
                                    at::cuda::getCurrentCUDAStream());
-      // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
+      // unset the amax for te_output to avoid atomic amax updates in kernel
       te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
+      // quantize high precision activation output to fp8 using te_output's scale
       nvte_quantize_v2(te_output_act.data(), te_output.data(), quant_config,
                        at::cuda::getCurrentCUDAStream());
     });
