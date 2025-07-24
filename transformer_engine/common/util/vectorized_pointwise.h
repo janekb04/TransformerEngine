@@ -183,6 +183,7 @@ __launch_bounds__(unary_kernel_threads) __global__
   VectorizedStorer<OutputType, nvec, aligned> storer(output, N);
   ComputeType max = 0;
   ComputeType s = 1;
+  const bool requires_amax = (amax != nullptr);
   if constexpr (is_fp8<OutputType>::value) {
     if (scale != nullptr) s = *scale;
   }
@@ -196,27 +197,28 @@ __launch_bounds__(unary_kernel_threads) __global__
     for (int i = 0; i < nvec; ++i) {
       const ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
       ComputeType temp = OP(val, p);
-      if constexpr (is_fp8<OutputType>::value) {
+      if (requires_amax) {
         __builtin_assume(max >= 0);
         max = fmaxf(fabsf(temp), max);
-
+      }
+      if constexpr (is_fp8<OutputType>::value) {
         temp = temp * s;
       }
-
       storer.separate()[i] = static_cast<OutputType>(temp);
     }
     storer.store(tid, N);
   }
-  if constexpr (is_fp8<OutputType>::value) {
-    // Reduce amax over block
-    if (amax != nullptr) {
-      max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
-      if (threadIdx.x == 0) {
-        static_assert(std::is_same<ComputeType, float>::value);
-        atomicMaxFloat(amax, max);
-      }
-    }
 
+  // Reduce amax over block
+  if (requires_amax) {
+    max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+    if (threadIdx.x == 0) {
+      static_assert(std::is_same<ComputeType, float>::value);
+      atomicMaxFloat(amax, max);
+    }
+  }
+  
+  if constexpr (is_fp8<OutputType>::value) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
       reciprocal<ComputeType>(scale_inv, s);
@@ -406,6 +408,7 @@ __launch_bounds__(unary_kernel_threads) __global__
   const size_t M = num_aligned_elements * m;
   ComputeType max = 0;
   ComputeType s = 1;
+  const bool requires_amax = (amax != nullptr);
   if constexpr (is_fp8<OutputType>::value) {
     if (scale != nullptr) s = *scale;
   }
@@ -425,25 +428,28 @@ __launch_bounds__(unary_kernel_threads) __global__
       const ComputeType val = static_cast<ComputeType>(loader0.separate()[i]);
       const ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
       ComputeType temp = static_cast<ComputeType>(Activation(val, p) * val2);
-      if constexpr (is_fp8<OutputType>::value) {
+      if (requires_amax) {
         __builtin_assume(max >= 0);
         max = fmaxf(fabsf(temp), max);
+      }
+      if constexpr (is_fp8<OutputType>::value) {
         temp = temp * s;
       }
       storer.separate()[i] = static_cast<OutputType>(static_cast<ComputeType>(temp));
     }
     storer.store(id_x, n);
   }
-  if constexpr (is_fp8<OutputType>::value) {
-    // Reduce amax over block
-    if (amax != nullptr) {
-      max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
-      if (threadIdx.x == 0) {
-        static_assert(std::is_same<ComputeType, float>::value);
-        atomicMaxFloat(amax, max);
-      }
+  
+  // Reduce amax over block
+  if (requires_amax) {
+    max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+    if (threadIdx.x == 0) {
+      static_assert(std::is_same<ComputeType, float>::value);
+      atomicMaxFloat(amax, max);
     }
-
+  }
+  
+  if constexpr (is_fp8<OutputType>::value) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
       reciprocal<ComputeType>(scale_inv, s);
