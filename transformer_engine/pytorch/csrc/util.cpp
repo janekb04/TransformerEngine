@@ -8,15 +8,10 @@
 
 #include "common.h"
 
-std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrapper& input,
-                                                  bool rowwise) {
-  using namespace transformer_engine::pytorch;
+#include "common/util/cuda_runtime.h"
 
-  if (input.scaling_mode() == NVTE_INVALID_SCALING) {
-    NVTE_ERROR("Invalid scaling mode for swizzle.");
-  } else if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
-    return std::nullopt;
-  }
+at::Tensor swizzle_mxfp8_scaling_factors(transformer_engine::TensorWrapper& input, bool rowwise) {
+  using namespace transformer_engine::pytorch;
 
   NVTE_CHECK(input.element_size() == 1, "8-bit input required for swizzling scaling factors.");
 
@@ -74,6 +69,27 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
   }
 
   return swizzled_scale_inv;
+}
+
+at::Tensor swizzle_block_scaling_scaling_factors_to_mxfp8(transformer_engine::TensorWrapper& input,
+                                                          bool rowwise) {
+  
+}
+
+std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrapper& input,
+                                                  bool rowwise) {
+  if (input.scaling_mode() == NVTE_INVALID_SCALING) {
+    NVTE_ERROR("Invalid scaling mode for swizzle.");
+  } else if (input.scaling_mode() == NVTE_MXFP8_1D_SCALING) {
+    return swizzle_mxfp8_scaling_factors(input, rowwise);
+  } else if ( // emulate block scaling using mxfp8 on blackwell and newer
+    (input.scaling_mode() == NVTE_BLOCK_SCALING_1D
+    || input.scaling_mode() == NVTE_BLOCK_SCALING_2D)
+    && transformer_engine::cuda::sm_arch() > 90) {
+    return swizzle_block_scaling_scaling_factors_to_mxfp8(input, rowwise);
+  } else {
+    return std::nullopt;
+  }
 }
 
 std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
