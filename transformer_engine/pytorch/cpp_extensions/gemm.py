@@ -13,6 +13,7 @@ from ..utils import get_sm_count, _empty_tensor
 
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
 __all__ = [
@@ -28,6 +29,50 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     if scale not in (0.0, None):
         raise ValueError("scale must be zero")
     return 0.0
+
+def unsqueeze_matrix(a: torch.Tensor, unsqueeze_rows: int, unsqueeze_cols: int) -> torch.Tensor:
+    assert a.dim() == 2
+    rows = a.shape[0]
+    cols = a.shape[1]
+    return (
+        a
+        .contiguous()
+        .view(-1)
+        .unsqueeze(1)
+        .repeat(1, unsqueeze_cols)
+        .view(rows, cols * unsqueeze_cols)
+        .repeat(1, unsqueeze_rows)
+        .view(rows * unsqueeze_rows, cols * unsqueeze_cols)
+    )
+
+def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase):
+    def maybe_unsqueeze_2d_scaling_factors(sf: Optional[torch.Tensor]):
+        if sf is None:
+            return None
+        return unsqueeze_matrix((sf.view(torch.int32) >> 23).to(torch.uint8), 128, 4)
+    def maybe_unsqueeze_1d_scaling_factors(sf: Optional[torch.Tensor]):
+        if sf is None:
+            return None
+        return unsqueeze_matrix((sf.view(torch.int32) >> 23).to(torch.uint8).T, 1, 4)
+    
+    if a._is_2D_scaled:
+        return MXFP8TensorBase(
+            a._rowwise_data,
+            maybe_unsqueeze_2d_scaling_factors(a._rowwise_scale_inv),
+            a._columnwise_data,
+            maybe_unsqueeze_2d_scaling_factors(a._columnwise_scale_inv),
+            a._fp8_dtype,
+            None
+        )
+    else:
+        return MXFP8TensorBase(
+            a._rowwise_data,
+            maybe_unsqueeze_1d_scaling_factors(a._rowwise_scale_inv),
+            a._columnwise_data,
+            maybe_unsqueeze_1d_scaling_factors(a._columnwise_scale_inv),
+            a._fp8_dtype,
+            None
+        )
 
 
 def general_gemm(
@@ -98,6 +143,9 @@ def general_gemm(
             or B._data_format != tex.Float8BlockScaleTensorFormat.GEMM_READY
         ):
             raise RuntimeError("GEMM with Float8BlockwiseQTensor requires GEMM_READY format")
+
+        A = convert_blockwise_scaling_to_mxfp8_tensor(A)
+        B = convert_blockwise_scaling_to_mxfp8_tensor(B)
 
     args = (
         A,
