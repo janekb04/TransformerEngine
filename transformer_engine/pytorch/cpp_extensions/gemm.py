@@ -30,50 +30,48 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
         raise ValueError("scale must be zero")
     return 0.0
 
-def unsqueeze_matrix(a: torch.Tensor, unsqueeze_rows: int, unsqueeze_cols: int) -> torch.Tensor:
-    assert a.dim() == 2
-    rows = a.shape[0]
-    cols = a.shape[1]
-    return (
-        a
-        .contiguous()
-        .view(-1)
-        .unsqueeze(1)
-        .repeat(1, unsqueeze_cols)
-        .view(rows, cols * unsqueeze_cols)
-        .repeat(1, unsqueeze_rows)
-        .view(rows * unsqueeze_rows, cols * unsqueeze_cols)
-    )
 
-def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase):
-    def maybe_unsqueeze_2d_scaling_factors(sf: Optional[torch.Tensor]):
+def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, transa: bool):
+    def unsqueeze_matrix(a: torch.Tensor, unsqueeze_rows: int, unsqueeze_cols: int) -> torch.Tensor:
+        assert a.dim() == 2
+        rows = a.shape[0]
+        cols = a.shape[1]
+        return (
+            a
+            .contiguous()
+            .view(-1)
+            .unsqueeze(1)
+            .repeat(1, unsqueeze_cols)
+            .view(rows, cols * unsqueeze_cols)
+            .repeat(1, unsqueeze_rows)
+            .view(rows * unsqueeze_rows, cols * unsqueeze_cols)
+        )
+    def maybe_unsqueeze_scaling_factors(sf: Optional[torch.Tensor], is_2d: bool):
         if sf is None:
             return None
-        return unsqueeze_matrix((sf.view(torch.int32) >> 23).to(torch.uint8), 128, 4)
-    def maybe_unsqueeze_1d_scaling_factors(sf: Optional[torch.Tensor]):
-        if sf is None:
+        sf_uint8 = (sf.view(torch.int32) >> 23).to(torch.uint8)
+        if is_2d:
+            return unsqueeze_matrix(sf_uint8, 128, 4)
+        else:
+            return unsqueeze_matrix(sf_uint8.T, 1, 4)
+    def transposed_view(a: Optional[torch.Tensor]):
+        if a is None:
             return None
-        return unsqueeze_matrix((sf.view(torch.int32) >> 23).to(torch.uint8).T, 1, 4)
-    
-    if a._is_2D_scaled:
-        return MXFP8TensorBase(
-            a._rowwise_data,
-            maybe_unsqueeze_2d_scaling_factors(a._rowwise_scale_inv),
-            a._columnwise_data,
-            maybe_unsqueeze_2d_scaling_factors(a._columnwise_scale_inv),
-            a._fp8_dtype,
-            None
-        )
-    else:
-        return MXFP8TensorBase(
-            a._rowwise_data,
-            maybe_unsqueeze_1d_scaling_factors(a._rowwise_scale_inv),
-            a._columnwise_data,
-            maybe_unsqueeze_1d_scaling_factors(a._columnwise_scale_inv),
-            a._fp8_dtype,
-            None
-        )
+        return a.T.contiguous()
 
+    rowwise_data = a._rowwise_data
+    rowwise_scale_inv = maybe_unsqueeze_scaling_factors(a._rowwise_scale_inv, a._is_2D_scaled)
+    columnwise_data = transposed_view(a._columnwise_data)
+    columnwise_scale_inv = transposed_view(maybe_unsqueeze_scaling_factors(a._columnwise_scale_inv, a._is_2D_scaled))
+
+    return (MXFP8TensorBase(
+        rowwise_data,
+        rowwise_scale_inv,
+        columnwise_data,
+        columnwise_scale_inv,
+        a._fp8_dtype,
+        None
+    ), transa)
 
 def general_gemm(
     A: torch.Tensor,
@@ -144,8 +142,8 @@ def general_gemm(
         ):
             raise RuntimeError("GEMM with Float8BlockwiseQTensor requires GEMM_READY format")
 
-        A = convert_blockwise_scaling_to_mxfp8_tensor(A)
-        B = convert_blockwise_scaling_to_mxfp8_tensor(B)
+        A, transa = convert_blockwise_scaling_to_mxfp8_tensor(A, transa)
+        B, transb = convert_blockwise_scaling_to_mxfp8_tensor(B, transb)
 
     args = (
         A,
