@@ -46,9 +46,7 @@ def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, tra
             .repeat(1, unsqueeze_rows)
             .view(rows * unsqueeze_rows, cols * unsqueeze_cols)
         )
-    def unsqueeze_scaling_factors(sf: Optional[torch.Tensor], is_2d: bool):
-        if sf is None:
-            return None
+    def unsqueeze_scaling_factors(sf: torch.Tensor, is_2d: bool):
         sf_uint8 = (sf.view(torch.int32) >> 23).to(torch.uint8)
         if is_2d:
             return unsqueeze_matrix(sf_uint8, 128, 4)
@@ -57,26 +55,18 @@ def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, tra
 
     rowwise_usage = trans ^ (not is_A)
     if rowwise_usage:
-        rowwise_data = a._rowwise_data
-        rowwise_scale_inv = unsqueeze_scaling_factors(a._rowwise_scale_inv, a._is_2D_scaled)
-        assert rowwise_data is not None
-        assert rowwise_scale_inv is not None
-        columnwise_data = None
-        columnwise_scale_inv = None
+        data = a._rowwise_data
+        scale_inv = unsqueeze_scaling_factors(a._rowwise_scale_inv, a._is_2D_scaled)
     else:
-        rowwise_data = a._columnwise_data
-        rowwise_scale_inv = unsqueeze_scaling_factors(a._columnwise_scale_inv, a._is_2D_scaled)
-        assert rowwise_data is not None
-        assert rowwise_scale_inv is not None
-        columnwise_data = None
-        columnwise_scale_inv = None
+        data = a._columnwise_data
+        scale_inv = unsqueeze_scaling_factors(a._columnwise_scale_inv, a._is_2D_scaled)
         trans = not trans
 
     return (MXFP8TensorBase(
-        rowwise_data,
-        rowwise_scale_inv,
-        columnwise_data,
-        columnwise_scale_inv,
+        data,
+        scale_inv,
+        None,
+        None,
         a._fp8_dtype,
         None
     ), trans)
