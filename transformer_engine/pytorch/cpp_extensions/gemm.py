@@ -46,7 +46,7 @@ def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, tra
             .repeat(1, unsqueeze_rows)
             .view(rows * unsqueeze_rows, cols * unsqueeze_cols)
         )
-    def maybe_unsqueeze_scaling_factors(sf: Optional[torch.Tensor], is_2d: bool):
+    def unsqueeze_scaling_factors(sf: Optional[torch.Tensor], is_2d: bool):
         if sf is None:
             return None
         sf_uint8 = (sf.view(torch.int32) >> 23).to(torch.uint8)
@@ -60,9 +60,9 @@ def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, tra
         return a.T.contiguous()
 
     rowwise_data = a._rowwise_data
-    rowwise_scale_inv = maybe_unsqueeze_scaling_factors(a._rowwise_scale_inv, a._is_2D_scaled)
+    rowwise_scale_inv = unsqueeze_scaling_factors(a._rowwise_scale_inv, a._is_2D_scaled)
     columnwise_data = transposed_view(a._columnwise_data)
-    columnwise_scale_inv = transposed_view(maybe_unsqueeze_scaling_factors(a._columnwise_scale_inv, a._is_2D_scaled))
+    columnwise_scale_inv = transposed_view(unsqueeze_scaling_factors(a._columnwise_scale_inv, a._is_2D_scaled))
 
     return (MXFP8TensorBase(
         rowwise_data,
