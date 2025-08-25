@@ -54,10 +54,6 @@ def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, tra
             return unsqueeze_matrix(sf_uint8, 128, 4)
         else:
             return unsqueeze_matrix(sf_uint8.T, 1, 4)
-    def transposed_view(a: Optional[torch.Tensor]):
-        if a is None:
-            return None
-        return a.T.contiguous()
 
     rowwise_usage = trans ^ (not is_A)
     if rowwise_usage:
@@ -68,12 +64,13 @@ def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, tra
         columnwise_data = None
         columnwise_scale_inv = None
     else:
-        columnwise_data = transposed_view(a._columnwise_data)
-        columnwise_scale_inv = transposed_view(unsqueeze_scaling_factors(a._columnwise_scale_inv, a._is_2D_scaled))
-        assert columnwise_data is not None
-        assert columnwise_scale_inv is not None
-        rowwise_data = None
-        rowwise_scale_inv = None
+        rowwise_data = a._columnwise_data
+        rowwise_scale_inv = unsqueeze_scaling_factors(a._columnwise_scale_inv, a._is_2D_scaled)
+        assert rowwise_data is not None
+        assert rowwise_scale_inv is not None
+        columnwise_data = None
+        columnwise_scale_inv = None
+        trans = not trans
 
     return (MXFP8TensorBase(
         rowwise_data,
