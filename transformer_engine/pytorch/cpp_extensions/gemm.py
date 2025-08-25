@@ -31,7 +31,7 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     return 0.0
 
 
-def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, transa: bool):
+def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, trans: bool, is_A: bool):
     def unsqueeze_matrix(a: torch.Tensor, unsqueeze_rows: int, unsqueeze_cols: int) -> torch.Tensor:
         assert a.dim() == 2
         rows = a.shape[0]
@@ -59,10 +59,21 @@ def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, tra
             return None
         return a.T.contiguous()
 
-    rowwise_data = a._rowwise_data
-    rowwise_scale_inv = unsqueeze_scaling_factors(a._rowwise_scale_inv, a._is_2D_scaled)
-    columnwise_data = transposed_view(a._columnwise_data)
-    columnwise_scale_inv = transposed_view(unsqueeze_scaling_factors(a._columnwise_scale_inv, a._is_2D_scaled))
+    rowwise_usage = trans ^ (not is_A)
+    if rowwise_usage:
+        rowwise_data = a._rowwise_data
+        rowwise_scale_inv = unsqueeze_scaling_factors(a._rowwise_scale_inv, a._is_2D_scaled)
+        assert rowwise_data is not None
+        assert rowwise_scale_inv is not None
+        columnwise_data = None
+        columnwise_scale_inv = None
+    else:
+        columnwise_data = transposed_view(a._columnwise_data)
+        columnwise_scale_inv = transposed_view(unsqueeze_scaling_factors(a._columnwise_scale_inv, a._is_2D_scaled))
+        assert columnwise_data is not None
+        assert columnwise_scale_inv is not None
+        rowwise_data = None
+        rowwise_scale_inv = None
 
     return (MXFP8TensorBase(
         rowwise_data,
@@ -71,7 +82,7 @@ def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, tra
         columnwise_scale_inv,
         a._fp8_dtype,
         None
-    ), transa)
+    ), trans)
 
 def general_gemm(
     A: torch.Tensor,
@@ -142,8 +153,8 @@ def general_gemm(
         ):
             raise RuntimeError("GEMM with Float8BlockwiseQTensor requires GEMM_READY format")
 
-        A, transa = convert_blockwise_scaling_to_mxfp8_tensor(A, transa)
-        B, transb = convert_blockwise_scaling_to_mxfp8_tensor(B, transb)
+        A, transa = convert_blockwise_scaling_to_mxfp8_tensor(A, transa, True)
+        B, transb = convert_blockwise_scaling_to_mxfp8_tensor(B, transb, False)
 
     args = (
         A,
