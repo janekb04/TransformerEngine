@@ -46,19 +46,36 @@ def convert_blockwise_scaling_to_mxfp8_tensor(a: Float8BlockwiseQTensorBase, row
             .repeat(1, unsqueeze_rows)
             .view(rows * unsqueeze_rows, cols * unsqueeze_cols)
         )
-    def unsqueeze_scaling_factors(sf: torch.Tensor, is_2d: bool):
+    def unsqueeze_scaling_factors(sf: torch.Tensor, data_shape: torch.Size, is_2d: bool):
         sf_uint8 = (sf.view(torch.int32) >> 23).to(torch.uint8)
         if is_2d:
-            return unsqueeze_matrix(sf_uint8, 128, 4)
+            cols_unpadded = (data_shape[1] + 128 - 1) // 128
+            return unsqueeze_matrix(sf_uint8[:, :cols_unpadded], 128, 4)
         else:
             return unsqueeze_matrix(sf_uint8.T, 1, 4)
 
     if rowwise:
         data = a._rowwise_data
-        scale_inv = unsqueeze_scaling_factors(a._rowwise_scale_inv, a._is_2D_scaled)
+
+        flat_first_dim = 1
+        for extent in data.shape[:-1]:
+            flat_first_dim *= extent
+        flat_last_dim = data.shape[-1]
+        data_shape = (flat_first_dim, flat_last_dim)
+        assert flat_first_dim % 128 == 0
+
+        scale_inv = unsqueeze_scaling_factors(a._rowwise_scale_inv, data_shape, a._is_2D_scaled)
     else:
         data = a._columnwise_data
-        scale_inv = unsqueeze_scaling_factors(a._columnwise_scale_inv, a._is_2D_scaled)
+
+        flat_first_dim = data.shape[0]
+        flat_last_dim = 1
+        for extent in data.shape[1:]:
+            flat_last_dim *= extent
+        data_shape = (flat_first_dim, flat_last_dim)
+        assert flat_first_dim % 128 == 0
+
+        scale_inv = unsqueeze_scaling_factors(a._columnwise_scale_inv, data_shape, a._is_2D_scaled)
 
     return MXFP8TensorBase(
         data,
