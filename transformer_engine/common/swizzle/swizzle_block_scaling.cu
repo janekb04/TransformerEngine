@@ -21,6 +21,7 @@ constexpr uint32_t WARP_SIZE = 32;
 namespace swizzle_kernel_1d {
 constexpr uint32_t WARPS_X_PER_TB = 2;  // configurable
 constexpr uint32_t WARPS_Y_PER_TB = 2;  // configurable
+constexpr uint32_t TILES_X_PER_WARP = 4; // configurable
 
 // Transposes a 4x4 matrix of bytes stored across four threads with consecutive thread ids where
 // each thread stores a single row (of four bytes).
@@ -82,51 +83,60 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
   const uint32_t warp_y = threadIdx.y;
   __builtin_assume(warp_y < WARPS_Y_PER_TB);
 
-  // compute tile indices
+  // calculate this warp's output tile row / input tile column
   const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
-  const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
-  const uint32_t in_tile_y = out_tile_x;
   const uint32_t in_tile_x = out_tile_y;
-
   // bounds check; uniform branch
-  if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
+  if (out_tile_y >= tiles_y) {
     return;
   }
 
-  // calculate this warp's input base pointer
+  // calculate this warp's base output tile column / input tile row
+  const uint32_t out_tile_x_base = blockIdx.x * WARPS_X_PER_TB + warp_x;
+  const uint32_t in_tile_y_base = out_tile_x_base;
+  // calculate this warp's base input pointer
   constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(uint4);
-  const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
+  const void* const warp_src_base = in + in_tile_y_base * in_y_stride + in_tile_x * in_x_stride;
 
-  // load scaling factors for this lane's initial four 1x128 tiles
-  uint4 sf;
-  if constexpr (no_oob) {
-    sf = reinterpret_cast<const uint4*>(warp_src)[lane];
-  } else {
-    if ((out_tile_y < tiles_y - 1) || lane < first_oob) {
-      sf = reinterpret_cast<const uint4*>(warp_src)[lane];
+  // calculate this lane's swizzled loading index
+  const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
+
+  // load input scaling factors, reinterpreted from fp32 as uint32
+  uint4 sf[TILES_X_PER_WARP];
+#pragma unroll(TILES_X_PER_WARP)
+  for (int i = 0, out_tile_x = out_tile_x_base; i < TILES_X_PER_WARP && out_tile_x < tiles_x; ++i, ++out_tile_x) {
+    const void* const warp_src = warp_src_base + i * in_y_stride;
+    if constexpr (no_oob) {
+      sf[i] = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
     } else {
-      sf = uint4{0, 0, 0, 0};
+      if ((out_tile_y < tiles_y - 1) || lane < first_oob) {
+        sf[i] = reinterpret_cast<const uint4*>(warp_src)[lane_load_idx];
+      } else {
+        sf[i] = uint4{0, 0, 0, 0};
+      }
     }
   }
 
-  // pack the exponent bits of the scaling factors
-  uint32_t packed_exponents = (sf.x >> 23) | (sf.y >> 15) | (sf.z >> 7) | (sf.w << 1);
+  // swizzle the scaling factors
+#pragma unroll(TILES_X_PER_WARP)
+  for (int i = 0; i < TILES_X_PER_WARP; ++i) {
+    uint32_t packed_exponents = (sf[i].x >> 23) | (sf[i].y >> 15) | (sf[i].z >> 7) | (sf[i].w << 1);
+    constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF;  // no divergent branches
+    __builtin_assume(__activemask() == 0xFFFFFFFF);
+    packed_exponents = transpose_4x4_byte_matrix(packed_exponents, lane % 4, __activemask());
+    sf[i] = broadcast_uint32_t_to_uint4(packed_exponents);
+  }
 
-  // partially swizzle the scaling factors
-  constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF;  // no divergent branches
-  const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
-  packed_exponents = __shfl_sync(ACTIVE_MASK, packed_exponents, lane_load_idx);
-
-  // transpose 4x4 matrices of scaling factors
-  packed_exponents = transpose_4x4_byte_matrix(packed_exponents, lane % 4, ACTIVE_MASK);
-
-  // broadcast the scaling factors for sixteen 1x32 tiles
-  sf = broadcast_uint32_t_to_uint4(packed_exponents);
-
-  // store them cooperatively for 512 1x32 tiles in a 128x128 tile
+  // calculate this warp's base output pointer
   constexpr uint32_t out_x_stride = 512;
-  void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
-  reinterpret_cast<uint4*>(warp_dst)[lane] = sf;
+  void* const warp_dst_base = out + out_tile_y * out_y_stride + out_tile_x_base * out_x_stride;
+
+  // store the swizzled scaling factors
+#pragma unroll(TILES_X_PER_WARP)
+  for (int i = 0, out_tile_x = out_tile_x_base; i < TILES_X_PER_WARP && out_tile_x < tiles_x; ++i, ++out_tile_x) {
+    void* const warp_dst = warp_dst_base + i * out_x_stride;
+    reinterpret_cast<uint4*>(warp_dst)[lane] = sf[i];
+  }
 }
 
 void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
