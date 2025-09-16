@@ -93,40 +93,45 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
     return;
   }
 
+  __shared__ alignas(128) union {
+      uint4 data[WARPS_X_PER_TB][WARPS_Y_PER_TB][WARP_SIZE];
+      uint32_t t[WARPS_X_PER_TB][WARPS_Y_PER_TB][4][WARP_SIZE];
+  } smem;
+
   // calculate this warp's input base pointer
   constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(uint4);
   const void* const warp_src = in + in_tile_y * in_y_stride + in_tile_x * in_x_stride;
 
   // load scaling factors for this lane's initial four 1x128 tiles
-  uint4 sf;
   if constexpr (no_oob) {
-    sf = reinterpret_cast<const uint4*>(warp_src)[lane];
+    smem.data[warp_x][warp_y][lane] = reinterpret_cast<const uint4*>(warp_src)[lane];
   } else {
     if ((out_tile_y < tiles_y - 1) || lane < first_oob) {
-      sf = reinterpret_cast<const uint4*>(warp_src)[lane];
+      smem.data[warp_x][warp_y][lane] = reinterpret_cast<const uint4*>(warp_src)[lane];
     } else {
-      sf = uint4{0, 0, 0, 0};
+      smem.data[warp_x][warp_y][lane] = uint4{0, 0, 0, 0};
     }
   }
+  __syncwarp(0xFFFFFFFF);
+  union { 
+      uint4 v;
+      uint64_t a[2];
+  } sf;
+  sf.v.x = smem.t[warp_x][warp_y][0][lane];
+  sf.v.y = smem.t[warp_x][warp_y][1][lane];
+  sf.v.z = smem.t[warp_x][warp_y][2][lane];
+  sf.v.w = smem.t[warp_x][warp_y][3][lane];
 
-  // pack the exponent bits of the scaling factors
-  uint32_t packed_exponents = (sf.x >> 23) | (sf.y >> 15) | (sf.z >> 7) | (sf.w << 1);
+  sf.a[0] = (sf.a[0] << 1) | (sf.a[0] >> 7);
+  sf.a[0] = sf.a[0] | (sf.a[0] >> 16);
 
-  // partially swizzle the scaling factors
-  constexpr uint32_t ACTIVE_MASK = 0xFFFFFFFF;  // no divergent branches
-  const uint32_t lane_load_idx = (lane % 4) * 8 + (lane / 4);
-  packed_exponents = __shfl_sync(ACTIVE_MASK, packed_exponents, lane_load_idx);
-
-  // transpose 4x4 matrices of scaling factors
-  packed_exponents = transpose_4x4_byte_matrix(packed_exponents, lane % 4, ACTIVE_MASK);
-
-  // broadcast the scaling factors for sixteen 1x32 tiles
-  sf = broadcast_uint32_t_to_uint4(packed_exponents);
+  sf.a[1] = (sf.a[1] << 1) | (sf.a[1] >> 7);
+  sf.a[1] = sf.a[1] | (sf.a[1] >> 16);
 
   // store them cooperatively for 512 1x32 tiles in a 128x128 tile
   constexpr uint32_t out_x_stride = 512;
   void* const warp_dst = out + out_tile_y * out_y_stride + out_tile_x * out_x_stride;
-  reinterpret_cast<uint4*>(warp_dst)[lane] = sf;
+  reinterpret_cast<uint4*>(warp_dst)[lane] = sf.v;
 }
 
 void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
