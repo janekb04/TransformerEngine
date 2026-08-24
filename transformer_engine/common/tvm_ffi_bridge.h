@@ -15,6 +15,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -122,6 +124,11 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
       return DLDataType{kDLFloat8_e5m2, 8, 1};
     case kNVTEFloat8E8M0:
       return DLDataType{kDLFloat8_e8m0fnu, 8, 1};
+    // FP4. DLPack has no 4-bit storage unit, so E2M1 travels the way tvm-ffi and torch spell it,
+    // as float4_e2m1fnx2: two values to a storage element, i.e. lanes == 2. The extents are
+    // packed to match (see DLTensorWrapper), because a TE tensor carries logical element counts.
+    case kNVTEFloat4E2M1:
+      return DLDataType{kDLFloat4_e2m1fn, 4, 2};
     default:
       NVTE_ERROR("unsupported NVTEDType: ", static_cast<int>(type));
   }
@@ -129,18 +136,21 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
 
 class DLTensorWrapper : public DLTensor {
  public:
+  static constexpr int kMaxNDim = sizeof(NVTEShape::data) / sizeof(NVTEShape::data[0]);
+
   // Null wrapper (data == nullptr): packs as TVM-FFI None, no allocation.
   DLTensorWrapper() : DLTensor{} {}
 
-  explicit DLTensorWrapper(const NVTEBasicTensor &tensor, bool flatten_2D = true) {
-    const int32_t device_index = transformer_engine::cuda::current_device();
+  explicit DLTensorWrapper(const NVTEBasicTensor &tensor, bool flatten_2D = true,
+                           int32_t device_index = -1) : DLTensor{} {
+    if (device_index < 0) {
+      device_index = transformer_engine::cuda::current_device();
+    }
     const int n = static_cast<int>(tensor.shape.ndim);
     if (flatten_2D && n > 2) {
       int64_t flat_first = 1;
       for (int i = 0; i + 1 < n; ++i) flat_first *= static_cast<int64_t>(tensor.shape.data[i]);
       const int64_t flat_last = static_cast<int64_t>(tensor.shape.data[n - 1]);
-      shape_buf_ = std::make_unique<int64_t[]>(2);
-      strides_buf_ = std::make_unique<int64_t[]>(2);
       shape_buf_[0] = flat_first;
       shape_buf_[1] = flat_last;
       strides_buf_[0] = flat_last;
@@ -148,16 +158,12 @@ class DLTensorWrapper : public DLTensor {
       this->ndim = 2;
     } else if (flatten_2D && n == 1) {
       const int64_t flat_last = static_cast<int64_t>(tensor.shape.data[0]);
-      shape_buf_ = std::make_unique<int64_t[]>(2);
-      strides_buf_ = std::make_unique<int64_t[]>(2);
       shape_buf_[0] = 1;
       shape_buf_[1] = flat_last;
       strides_buf_[0] = flat_last;
       strides_buf_[1] = 1;
       this->ndim = 2;
     } else {
-      shape_buf_ = std::make_unique<int64_t[]>(n);
-      strides_buf_ = std::make_unique<int64_t[]>(n);
       int64_t stride = 1;
       for (int i = n - 1; i >= 0; --i) {
         shape_buf_[i] = static_cast<int64_t>(tensor.shape.data[i]);
@@ -169,20 +175,50 @@ class DLTensorWrapper : public DLTensor {
     this->data = tensor.data_ptr;
     this->device = DLDevice{kDLCUDA, device_index};
     this->dtype = convert_to_dltype(tensor.dtype);
-    this->shape = shape_buf_.get();
-    this->strides = strides_buf_.get();
+    this->shape = shape_buf_;
+    this->strides = strides_buf_;
     this->byte_offset = 0;
+
+    // A sub-byte dtype is carried packed (dtype.lanes values to a storage element), so its
+    // extents have to be the packed ones: the innermost extent divides by the packing factor and
+    // so does every stride above it, which is exactly what the receiving side undoes to get the
+    // logical FP4 tensor back. Skipped for an absent buffer, whose shape is empty and which packs
+    // as TVM-FFI None anyway.
+    const int64_t packing = static_cast<int64_t>(this->dtype.lanes);
+    if (packing > 1 && this->ndim > 0) {
+      int64_t &innermost = shape_buf_[this->ndim - 1];
+      NVTE_CHECK(innermost % packing == 0, "Innermost extent of a ", static_cast<int>(dtype.bits),
+                 "-bit tensor must be a multiple of ", packing, ", but got ", innermost);
+      innermost /= packing;
+      for (int i = 0; i + 1 < this->ndim; ++i) strides_buf_[i] /= packing;
+    }
   }
 
-  ~DLTensorWrapper() = default;
-  DLTensorWrapper(const DLTensorWrapper &) = delete;
-  DLTensorWrapper &operator=(const DLTensorWrapper &) = delete;
-  DLTensorWrapper(DLTensorWrapper &&) = default;
-  DLTensorWrapper &operator=(DLTensorWrapper &&) = default;
+  DLTensorWrapper(const DLTensorWrapper &other) : DLTensor{other} {
+    std::memcpy(shape_buf_, other.shape_buf_, sizeof(shape_buf_));
+    std::memcpy(strides_buf_, other.strides_buf_, sizeof(strides_buf_));
+    this->shape = shape_buf_;
+    this->strides = strides_buf_;
+  }
+
+  DLTensorWrapper &operator=(const DLTensorWrapper &other) {
+    if (this != &other) {
+      std::memcpy(shape_buf_, other.shape_buf_, sizeof(shape_buf_));
+      std::memcpy(strides_buf_, other.strides_buf_, sizeof(strides_buf_));
+      this->shape = shape_buf_;
+      this->strides = strides_buf_;
+      this->data = other.data;
+      this->device = other.device;
+      this->dtype = other.dtype;
+      this->ndim = other.ndim;
+      this->byte_offset = other.byte_offset;
+    }
+    return *this;
+  }
 
  private:
-  std::unique_ptr<int64_t[]> shape_buf_;
-  std::unique_ptr<int64_t[]> strides_buf_;
+  int64_t shape_buf_[kMaxNDim];
+  int64_t strides_buf_[kMaxNDim];
 };
 
 }  // namespace tvm_ffi_bridge
