@@ -5,11 +5,13 @@
 """Low-level CuTeDSL helpers: bitcast/fma/exp2 intrinsics, f32 packing, and the 16-bit (bf16/fp16) packed-op kit."""
 
 import logging
+import os
 from types import SimpleNamespace
 from typing import Optional
 
 import cutlass
-from cutlass import Float32, Int64, Int32, Int16
+from cutlass import cute
+from cutlass import Boolean, Float32, Int64, Int32, Int16, Uint32, Uint64
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -26,6 +28,8 @@ _STR_FROM_CUTLASS_DTYPE = {v: k for k, v in _CUTLASS_DTYPE_FROM_STR.items()}
 
 logger = logging.getLogger("transformer_engine.cutedsl.utils")
 
+CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
+
 
 def device_compute_capability(device_id: Optional[int] = None) -> tuple:
     """(major, minor) compute capability of a CUDA device (current by default), or (0, 0) if it can't be queried."""
@@ -40,15 +44,6 @@ def device_compute_capability(device_id: Optional[int] = None) -> tuple:
         return (0, 0)
 
 
-def device_is_blackwell(device_id: Optional[int] = None) -> bool:
-    """Return True if the device (current device by default) is Blackwell family
-    (SM 10.0 / 11.0 / 12.0). Run-time check, not compile-time."""
-    major, minor = device_compute_capability(device_id)
-    return (
-        (major == 10 and minor == 0) or (major == 11 and minor == 0) or (major == 12 and minor == 0)
-    )
-
-
 def str_to_cutlass_dtype(dtype_str: str):
     """Convert a string dtype to a cutlass dtype, or None if unknown."""
     return _CUTLASS_DTYPE_FROM_STR.get(dtype_str, None)
@@ -59,7 +54,21 @@ def cutlass_dtype_to_str(dtype):
     return _STR_FROM_CUTLASS_DTYPE.get(dtype, None)
 
 
+# Runs if CUTE_DSL_ENABLE_ASSERTIONS=1 or --enable-assertions present in cute.compile
+def validate_tensor(tensor: Optional[cute.Tensor], expected_layout: cute.Layout, expected_dtype):
+    """Assert a tensor's layout and element type, skipping an absent (None) tensor."""
+    if tensor is None:
+        return
+    # pylint: disable=deprecated-method  # cute.testing.assert_ is not unittest's assert_
+    cute.testing.assert_(tensor.layout == expected_layout, "Tensor layout does not match")
+    cute.testing.assert_(tensor.element_type == expected_dtype, "Tensor dtype does not match")
+
+
 FP32_MANTISSA_BITS = 23
+FLOAT32_MAX = 3.4028234663852886e38
+BFLOAT16_MAX = 3.3895313892515355e38
+FLOAT8E4M3_MAX = 448.0
+FLOAT4E2M1_MAX = 6.0
 
 
 @dsl_user_op
@@ -94,6 +103,22 @@ def fma_f32(a: Float32, b: Float32, c: Float32, *, loc=None, ip=None) -> Float32
             has_side_effects=False,
             is_align_stack=False,
             asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
+def select_f32(cond: Boolean, if_true: Float32, if_false: Float32, *, loc=None, ip=None) -> Float32:
+    """Branchless f32 select."""
+    return Float32(
+        mlir_arith.select(
+            cond.ir_value(loc=loc, ip=ip),
+            if_true.ir_value(loc=loc, ip=ip),
+            if_false.ir_value(loc=loc, ip=ip),
+            loc=loc,
+            ip=ip,
         )
     )
 
@@ -122,6 +147,45 @@ def exp2f_rcp(scale_e8m0, *, loc=None, ip=None) -> Float32:
 
 
 @dsl_user_op
+def umulhi_u32(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
+    """High 32 bits of the unsigned 32x32 product (`__umulhi`)."""
+    return Uint32(
+        llvm.inline_asm(
+            T.i32(),
+            [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+            "mul.hi.u32 $0, $1, $2;",
+            "=r,r,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
+def u64_lo32(v: Uint64, *, loc=None, ip=None) -> Uint32:
+    """Low 32 bits of a u64."""
+    return Uint32(mlir_arith.trunci(T.i32(), v.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+
+
+@dsl_user_op
+def u64_hi32(v: Uint64, *, loc=None, ip=None) -> Uint32:
+    """High 32 bits of a u64."""
+    shifted = mlir_arith.shrui(
+        v.ir_value(loc=loc, ip=ip), Uint64(32).ir_value(loc=loc, ip=ip), loc=loc, ip=ip
+    )
+    return Uint32(mlir_arith.trunci(T.i32(), shifted, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def bool_to_u64(b: Boolean, *, loc=None, ip=None) -> Uint64:
+    """Zero-extend a predicate to u64."""
+    return Uint64(mlir_arith.extui(T.i64(), b.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+
+
+@dsl_user_op
 def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
     """Pack two f32 scalars into a single 64-bit register (`floatx2` layout).
 
@@ -137,6 +201,26 @@ def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
             has_side_effects=False,
             is_align_stack=False,
             asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
+def pack_u32x2(lo: Uint32, hi: Uint32, *, loc=None, ip=None) -> Int64:
+    """Pack two u32 into one 64-bit register (register-pair move, no real instruction)."""
+    return Int64(
+        llvm.inline_asm(
+            T.i64(),
+            [lo.ir_value(loc=loc, ip=ip), hi.ir_value(loc=loc, ip=ip)],
+            "mov.b64 $0, {$1, $2};",
+            "=l,r,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
         )
     )
 
@@ -154,6 +238,33 @@ def unpack_i64_to_i32x2(v: Int64, *, loc=None, ip=None):
     )
     hi = Int32(mlir_arith.trunci(T.i32(), hi_64, loc=loc, ip=ip))
     return lo, hi
+
+
+def make_prmt_u32(selector: int):
+    """A byte-permute op with the 16-bit selector baked in as an immediate.
+
+    prmt.b32 indexes the eight source bytes {a0..a3, b0..b7} and each selector nibble picks the
+    byte for one destination position, low nibble first. 0x5410 interleaves the low halves of a
+    and b (a0 a1 b0 b1), 0x7632 the high halves.
+    """
+
+    @dsl_user_op
+    def prmt_u32(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
+        return Uint32(
+            llvm.inline_asm(
+                T.i32(),
+                [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+                f"prmt.b32 $0, $1, $2, {selector:#x};",
+                "=r,r,r",
+                has_side_effects=False,
+                is_align_stack=False,
+                asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
+            )
+        )
+
+    return prmt_u32
 
 
 def _build_packed16_kit(in_fmt: str):
@@ -181,6 +292,8 @@ def _build_packed16_kit(in_fmt: str):
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
             )
         )
 
@@ -195,6 +308,8 @@ def _build_packed16_kit(in_fmt: str):
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
             )
         )
 
@@ -209,6 +324,8 @@ def _build_packed16_kit(in_fmt: str):
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
             )
         )
 
@@ -243,6 +360,8 @@ def _build_packed16_kit(in_fmt: str):
                     has_side_effects=False,
                     is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT,
+                    loc=loc,
+                    ip=ip,
                 )
             )
             i32 = Int32(
@@ -263,6 +382,8 @@ def _build_packed16_kit(in_fmt: str):
                     has_side_effects=False,
                     is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT,
+                    loc=loc,
+                    ip=ip,
                 )
             )
 
@@ -293,6 +414,8 @@ def _build_packed16_kit(in_fmt: str):
                     has_side_effects=False,
                     is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT,
+                    loc=loc,
+                    ip=ip,
                 )
             )
             return Float32(
@@ -304,6 +427,8 @@ def _build_packed16_kit(in_fmt: str):
                     has_side_effects=False,
                     is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT,
+                    loc=loc,
+                    ip=ip,
                 )
             )
 

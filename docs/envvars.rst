@@ -488,6 +488,15 @@ Debugging and Profiling
    :Default: ``0``
    :Description: Enable NVTX (NVIDIA Tools Extension) range profiling for Transformer Engine operations. When set to ``1``, NVTX markers are added to operations for profiling with NVIDIA Nsight Systems.
 
+.. envvar:: NVTE_IKET_ENABLED
+
+   :Type: ``int``
+   :Default: ``0``
+   :Description: Enable IKET (In-Kernel Event Tracing) instrumentation of the CuTeDSL kernels.
+                 ``0`` disables it and costs nothing; higher levels emit progressively more
+                 events. Collecting a trace additionally requires ``run-iket``, which ships with
+                 the ``nvidia-cutlass-dsl`` package.
+
 .. envvar:: NVTE_DEBUG_NUMERICS
 
    :Type: ``int`` (0 or 1)
