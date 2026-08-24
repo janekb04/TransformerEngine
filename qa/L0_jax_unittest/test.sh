@@ -49,6 +49,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --j
 
 CUTEDSL_BACKEND_TESTS=(
     tests/jax/test_mxfp8_cutedsl_backend.py
+    tests/jax/test_nvfp4_cutedsl_backend.py
     tests/jax/test_custom_call_compute.py
     tests/jax/test_recipe_characteristics.py
     tests/jax/test_layer.py
@@ -57,7 +58,6 @@ for cutedsl_test in "${CUTEDSL_BACKEND_TESTS[@]}"; do
     cutedsl_tag=$(echo "$cutedsl_test" | tr '/.' '__')
     NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN=1 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -s -v --junitxml=$XML_LOG_DIR/pytest_jax_cutedsl_${cutedsl_tag}.xml $TE_PATH/$cutedsl_test -k 'not distributed' || test_fail "cutedsl backend: $cutedsl_test"
 done
-
 
 if [ $RET -ne 0 ]; then
     echo "Error: some sub-tests failed: $FAILED_CASES"

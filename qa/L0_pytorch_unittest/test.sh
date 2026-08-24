@@ -86,6 +86,7 @@ NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 python3 -m p
 
 CUTEDSL_BACKEND_TESTS=(
     tests/pytorch/mxfp8
+    tests/pytorch/nvfp4
     tests/pytorch/test_quantized_tensor.py
     tests/pytorch/test_grouped_tensor.py
     tests/pytorch/test_cuda_graphs.py
