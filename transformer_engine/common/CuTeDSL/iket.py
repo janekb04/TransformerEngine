@@ -4,8 +4,9 @@
 
 """Helper for using IKET (In-Kernel Event Tracing) for profiling CuTeDSL kernels.
 
-Controlled with NVTE_IKET_ENABLED: 0 (the default) disables profiling and costs nothing,
-higher levels enable more events. Each event carries the level it becomes enabled at.
+Controlled with NVTE_IKET_ENABLED.
+0 (default) disables profiling.
+Higher levels enable more events.
 """
 
 import os

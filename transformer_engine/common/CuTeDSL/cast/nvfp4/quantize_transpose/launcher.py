@@ -132,8 +132,7 @@ def get_nvfp4_quantization_function(
     )
     try:
         compiled = compile_cutedsl_function_from_cfg(cfg)
-    # cute.compile raises DSLBaseError subclasses, which derive from Exception, not from
-    # RuntimeError. Any failure here just means the C++ dispatcher falls back to CUDA.
+    # cute.compile raises DSLBaseError subclasses, which derive from Exception
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning(
             "CuTeDSL NVFP4 kernel compilation failed, falling back to the CUDA C++ kernel: %s",

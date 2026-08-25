@@ -4,25 +4,9 @@
 
 """Cross-backend bit-exactness tests for the CuTeDSL NVFP4 quantize-transpose kernel.
 
-Every case quantizes the same input twice, once with the CuTeDSL backend disabled and once with
-it enabled, and requires the two results to agree byte for byte. The reference is the CUDA kernel
-the CuTeDSL one reimplements (quantize_transpose_nvfp4_tuned_1D.cuh), whose numerics are in turn
-pinned against a pure-PyTorch reference by test_nvfp4_quantize_exact.py.
-
-Which backend ran is observed, not inferred: every CuTeDSL kernel is wrapped in a counting proxy
-at import (see _install_call_counters) and every case states how many calls it expects. Without
-that, a kernel that fails to compile, a rejected config or an ineffective backend switch would
-all silently compare CUDA against itself and pass.
-
-Configurations the dispatcher never offers the backend (2D scaling, 4over6, non-bf16, misaligned
-shapes) are kept in the matrix, but they only check that enabling the backend is inert.
-
-Stochastic rounding is not compared byte for byte: which random bits an element gets follows from
-the work decomposition, so two implementations may legitimately disagree. test_stochastic_rounding
-checks the property that defines the rounding instead.
-
-RHT is out of scope: it is a pre-transform with tests of its own, and it splits the quantization
-into per-direction calls, so "which backend ran" stops being one fact per case.
+Every case quantizes an input with the CUDA C++ and CuTe DSL backends and asserts exactness.
+The CUDA C++ backend is quantize_transpose_nvfp4_tuned_1D.cuh.
+The CuTe DSL backend is CuTeDSL/cast/nvfp4/quantize_transpose/kernel.py.
 """
 
 import collections
@@ -47,18 +31,15 @@ from transformer_engine.pytorch import NVFP4Quantizer
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
-# The already-loaded core lib (dlopen refcounts: this returns the same handle, so the call
-# mutates the same dispatcher singleton the quantize ops read).
+# Check that the loaded libtransformer_engine.so has the CuTeDSL toggle.
 CORE_LIB = ctypes.CDLL(str(_get_shared_object_file("core")))
 if not hasattr(CORE_LIB, "nvte_set_cutedsl_quant_backend"):
     raise RuntimeError(
-        "libtransformer_engine.so lacks nvte_set_cutedsl_quant_backend -- rebuild the "
-        "Transformer Engine core library."
+        "libtransformer_engine.so lacks nvte_set_cutedsl_quant_backend,"
+        " which is required for this test to run"
     )
 
-# TE registers the CuTeDSL entrypoints at import time only when NVTE_ENABLE_CUTEDSL_QUANT_BACKEND
-# is set. These tests choose the backend through the C++ setter instead, so they wire up the
-# Python side regardless of the environment. Both calls are idempotent.
+# Test if registersing the CuTe DSL backend works. If it does, this is a no-op.
 backend_available = _load_tvm_ffi_library() and _register_cutedsl_backends()
 
 pytestmark = [

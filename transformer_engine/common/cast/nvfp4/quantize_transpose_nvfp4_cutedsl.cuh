@@ -32,7 +32,7 @@ struct NVFP4QuantConfig {
   bool use_fast_math;
   bool row_scaled_nvfp4;
   bool return_transpose;
-  bool is_noop;  // If a non-nullptr cast-noop flag tensor is passed to the kernel
+  bool is_noop;
 
   // Unique id identifying this kernel variant, for the resolved-kernel cache.
   constexpr uint32_t to_id() const {
@@ -96,9 +96,10 @@ inline bool nvfp4_quantize_transpose_cutedsl(const NVFP4QuantConfig &config, con
   if (config.return_transpose) {
     mO_col = tvm_ffi_bridge::DLTensorWrapper(output->columnwise_data, true, device_index);
     mS_col = tvm_ffi_bridge::DLTensorWrapper(output->columnwise_scale_inv, true, device_index);
-    // A caller that scales both directions by one per-tensor amax (TE/JAX does) allocates no
-    // columnwise amax; the CUDA kernel then encodes the transpose with the rowwise one, so hand
-    // the kernel that same tensor. Row-scaled quantization always has its own, per-column.
+    // The CUDA C++ kernel supports passing a nullptr for columnwise amax, in which case the
+    // rowwise amax is used for the transpose. The CuTE DSL kernel does not support this as
+    // CuTe DSL would require additional kernel variants to be compiled for each case of a tensor
+    // being null or not. However, we can support this on the C++ side, here.
     const SimpleTensor &amax_col =
         (output->columnwise_amax.dptr != nullptr) ? output->columnwise_amax : output->amax;
     mAmaxCol = tvm_ffi_bridge::DLTensorWrapper(amax_col, /*flatten_2D=*/false, device_index);

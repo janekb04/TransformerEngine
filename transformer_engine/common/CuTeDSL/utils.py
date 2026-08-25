@@ -59,7 +59,6 @@ def validate_tensor(tensor: Optional[cute.Tensor], expected_layout: cute.Layout,
     """Assert a tensor's layout and element type, skipping an absent (None) tensor."""
     if tensor is None:
         return
-    # pylint: disable=deprecated-method  # cute.testing.assert_ is not unittest's assert_
     cute.testing.assert_(tensor.layout == expected_layout, "Tensor layout does not match")
     cute.testing.assert_(tensor.element_type == expected_dtype, "Tensor dtype does not match")
 
@@ -111,7 +110,10 @@ def fma_f32(a: Float32, b: Float32, c: Float32, *, loc=None, ip=None) -> Float32
 
 @dsl_user_op
 def select_f32(cond: Boolean, if_true: Float32, if_false: Float32, *, loc=None, ip=None) -> Float32:
-    """Branchless f32 select."""
+    """
+    Branchless f32 select.
+    We need this because currently the CuTe DSL compiler is quite bad at branchless optimizations.
+    """
     return Float32(
         mlir_arith.select(
             cond.ir_value(loc=loc, ip=ip),
@@ -241,12 +243,7 @@ def unpack_i64_to_i32x2(v: Int64, *, loc=None, ip=None):
 
 
 def make_prmt_u32(selector: int):
-    """A byte-permute op with the 16-bit selector baked in as an immediate.
-
-    prmt.b32 indexes the eight source bytes {a0..a3, b0..b7} and each selector nibble picks the
-    byte for one destination position, low nibble first. 0x5410 interleaves the low halves of a
-    and b (a0 a1 b0 b1), 0x7632 the high halves.
-    """
+    """A byte-permute op with the 16-bit selector baked in as an immediate."""
 
     @dsl_user_op
     def prmt_u32(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:

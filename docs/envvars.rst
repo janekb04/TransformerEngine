@@ -492,10 +492,8 @@ Debugging and Profiling
 
    :Type: ``int``
    :Default: ``0``
-   :Description: Enable IKET (In-Kernel Event Tracing) instrumentation of the CuTeDSL kernels.
-                 ``0`` disables it and costs nothing; higher levels emit progressively more
-                 events. Collecting a trace additionally requires ``run-iket``, which ships with
-                 the ``nvidia-cutlass-dsl`` package.
+   :Description: Enable IKET (In-Kernel Event Tracing) range profiling for Transformer Engine CuTeDSL kernels. When greater than ``0``, IKET markers are added to CuTeDSL kernels for profiling with ``run-iket``.
+                 Higher values increase the verbosity of the emitted events.
 
 .. envvar:: NVTE_DEBUG_NUMERICS
 
