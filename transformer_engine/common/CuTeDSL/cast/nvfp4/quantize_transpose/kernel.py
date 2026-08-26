@@ -32,7 +32,12 @@ from transformer_engine.common.CuTeDSL.cast.nvfp4.utils import (
     compute_block_decode_sf,
     compute_block_encode_sf,
     compute_global_encode_sf,
-    make_mul2_cvt_bf16x8,
+    mul2_cvt_bf16x8_hi_to_fp4x8,
+    mul2_cvt_bf16x8_hi_to_fp4x8_sr,
+    mul2_cvt_bf16x8_lo_to_fp4x8,
+    mul2_cvt_bf16x8_lo_to_fp4x8_sr,
+    mul2_cvt_bf16x8_to_fp4x8,
+    mul2_cvt_bf16x8_to_fp4x8_sr,
     mul_cvt_bf16x8_to_fp4x8,
     mul_cvt_bf16x8_to_fp4x8_sr,
     pack_f32x2,
@@ -56,14 +61,10 @@ prmt_lo_u32 = make_prmt_u32(0x5410)
 # {a_hi, a_lo}, {b_hi, b_lo} -> {a_hi, a_hi}
 prmt_hi_u32 = make_prmt_u32(0x7632)
 
-# Exact (f32-coefficient) scale-and-convert of eight bf16 elements with packed mul.rn.f32x2:
-# bit-identical per lane to the CUDA kernel's scalar mul.rn.f32, at half the FP32 instruction
-# count. "interleave" takes the rowwise pass's four pair-registers of adjacent elements;
-# "lo"/"hi" take one column's halves of the colwise pass's eight row-registers.
-mul2_cvt_row = make_mul2_cvt_bf16x8("interleave", use_sr=False)
-mul2_cvt_row_sr = make_mul2_cvt_bf16x8("interleave", use_sr=True)
-mul2_cvt_col = (make_mul2_cvt_bf16x8("lo", use_sr=False), make_mul2_cvt_bf16x8("hi", use_sr=False))
-mul2_cvt_col_sr = (make_mul2_cvt_bf16x8("lo", use_sr=True), make_mul2_cvt_bf16x8("hi", use_sr=True))
+# The colwise pass picks its converter by wave: wave 0 owns the low bf16 of each of the eight
+# row registers it holds, wave 1 the high one.
+mul2_cvt_col = (mul2_cvt_bf16x8_lo_to_fp4x8, mul2_cvt_bf16x8_hi_to_fp4x8)
+mul2_cvt_col_sr = (mul2_cvt_bf16x8_lo_to_fp4x8_sr, mul2_cvt_bf16x8_hi_to_fp4x8_sr)
 
 
 def _abs_max_tree(vals):
@@ -827,7 +828,7 @@ class NVFP4QuantizeTransposeTuned1DKernel:
                             rbits47,
                         )
                     else:
-                        out = mul2_cvt_row_sr(
+                        out = mul2_cvt_bf16x8_to_fp4x8_sr(
                             frg_u32[w][0],
                             frg_u32[w][1],
                             frg_u32[w][2],
@@ -846,7 +847,7 @@ class NVFP4QuantizeTransposeTuned1DKernel:
                             coeff.to(Float32),
                         )
                     else:
-                        out = mul2_cvt_row(
+                        out = mul2_cvt_bf16x8_to_fp4x8(
                             frg_u32[w][0],
                             frg_u32[w][1],
                             frg_u32[w][2],
