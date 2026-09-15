@@ -21,6 +21,7 @@ _CUTLASS_DTYPE_FROM_STR = {
     "fp8_e4m3fn": cutlass.Float8E4M3FN,
     "fp8_e5m2": cutlass.Float8E5M2,
     "fp8_e8m0fnu": cutlass.Float8E8M0FNU,
+    "fp4_e2m1fn": cutlass.Float4E2M1FN,
 }
 _STR_FROM_CUTLASS_DTYPE = {v: k for k, v in _CUTLASS_DTYPE_FROM_STR.items()}
 
